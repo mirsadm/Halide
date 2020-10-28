@@ -272,7 +272,9 @@ Expr common_subexpression_elimination(const Expr &e_in, bool lift_all) {
     Expr e = e_in;
 
     // Early-out for trivial cases.
-    if (is_const(e) || e.as<Variable>()) return e;
+    if (is_const(e) || e.as<Variable>()) {
+        return e;
+    }
 
     debug(4) << "\n\n\nInput to CSE " << e << "\n";
 
@@ -335,7 +337,7 @@ namespace {
 // Normalize all names in an expr so that expr compares can be done
 // without worrying about mere name differences.
 class NormalizeVarNames : public IRMutator {
-    int counter;
+    int counter = 0;
 
     map<string, string> new_names;
 
@@ -359,9 +361,7 @@ class NormalizeVarNames : public IRMutator {
     }
 
 public:
-    NormalizeVarNames()
-        : counter(0) {
-    }
+    NormalizeVarNames() = default;
 };
 
 void check(const Expr &in, const Expr &correct) {
