@@ -577,7 +577,7 @@ WEAK int halide_opencl_release_unused_device_allocations(void *user_context) {
     {
         ScopedMutexLock lock(&free_list_lock);
         to_free = free_list;
-        free_list = NULL;
+        free_list = nullptr;
     }
     while (to_free) {
         debug(user_context) << "    clReleaseMemObject " << (void *)to_free->ptr->mem << "\n";
@@ -598,7 +598,7 @@ namespace Halide {
 namespace Runtime {
 namespace Internal {
 
-WEAK halide_device_allocation_pool opencl_allocation_pool = {NULL, NULL};
+WEAK halide_device_allocation_pool opencl_allocation_pool = {nullptr, nullptr};
 
 __attribute__((constructor))
 WEAK void register_opencl_allocation_pool() {
@@ -641,11 +641,11 @@ device_handle *retrieve_allocation_from_cache(void *user_context, ClContext& cl_
     // 7/8 of the size of the bucket. We keep at most 32 unused
     // allocations. We round up each allocation size to its top 4
     // most significant bits (see quantize_allocation_size).
-    device_handle *result = NULL;
+    device_handle *result = nullptr;
 
-    FreeListItem *best = NULL, *item = free_list;
-    FreeListItem **best_prev = NULL, **prev_ptr = &free_list;
-    FreeListItem *to_free = NULL;
+    FreeListItem *best = nullptr, *item = free_list;
+    FreeListItem **best_prev = nullptr, **prev_ptr = &free_list;
+    FreeListItem *to_free = nullptr;
 
     int depth = 0;
     while (item) {
@@ -653,7 +653,7 @@ device_handle *retrieve_allocation_from_cache(void *user_context, ClContext& cl_
             (size >= (item->size / 8) * 7) && // Not too much slop
             (cl_ctx.context == item->ctx) && // Same cuda context
             (cl_ctx.cmd_queue == item->stream) && // Can only safely re-use on the same stream on which it was freed
-            ((best == NULL) || (best->size > item->size))) { // Better than previous best fit
+            ((best == nullptr) || (best->size > item->size))) { // Better than previous best fit
             best = item;
             best_prev = prev_ptr;
             prev_ptr = &item->next;
@@ -664,8 +664,8 @@ device_handle *retrieve_allocation_from_cache(void *user_context, ClContext& cl_
             // and defer the actual cuMemFree calls until after we
             // release the free_list_lock.
             to_free = item;
-            *prev_ptr = NULL;
-            item = NULL;
+            *prev_ptr = nullptr;
+            item = nullptr;
             break;
         } else {
             prev_ptr = &item->next;
@@ -1033,23 +1033,29 @@ WEAK int halide_opencl_device_malloc(void *user_context, halide_buffer_t *buf) {
     uint64_t t_before = halide_current_time_ns(user_context);
 #endif
 
-    device_handle *dev_handle = (device_handle *)malloc(sizeof(device_handle));
-    if (dev_handle == nullptr) {
-        return CL_OUT_OF_HOST_MEMORY;
+    device_handle *dev_handle = nullptr;
+    if (halide_can_reuse_device_allocations(user_context)) {
+        dev_handle = retrieve_allocation_from_cache(user_context, ctx, size);
     }
 
-    cl_int err;
-    debug(user_context) << "    clCreateBuffer -> " << (int)size << " ";
-    cl_mem dev_ptr = clCreateBuffer(ctx.context, CL_MEM_READ_WRITE, size, NULL, &err);
-    if (err != CL_SUCCESS || dev_ptr == 0) {
-        debug(user_context) << get_opencl_error_name(err) << "\n";
-        error(user_context) << "CL: clCreateBuffer failed: "
-                            << get_opencl_error_name(err);
-        free(dev_handle);
-        return err;
-    } else {
-        debug(user_context) << (void *)dev_ptr << " device_handle: " << dev_handle << "\n";
-    }
+    if (!dev_handle) {
+        dev_handle = (device_handle *)malloc(sizeof(device_handle));
+        if (dev_handle == nullptr) {
+            return CL_OUT_OF_HOST_MEMORY;
+        }
+
+        cl_int err;
+        debug(user_context) << "    clCreateBuffer -> " << (int)size << " ";
+        cl_mem dev_ptr = clCreateBuffer(ctx.context, CL_MEM_READ_WRITE, size, nullptr, &err);
+        if (err != CL_SUCCESS || dev_ptr == 0) {
+            debug(user_context) << get_opencl_error_name(err) << "\n";
+            error(user_context) << "CL: clCreateBuffer failed: "
+                                << get_opencl_error_name(err);
+            free(dev_handle);
+            return err;
+        } else {
+            debug(user_context) << (void *)dev_ptr << " device_handle: " << dev_handle << "\n";
+        }
 
         dev_handle->mem = dev_ptr;
         dev_handle->offset = 0;
