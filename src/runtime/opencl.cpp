@@ -233,28 +233,6 @@ WEAK int halide_release_cl_context(void *user_context) {
     return 0;
 }
 
-WEAK int halide_opencl_release_unused_device_allocations(void *user_context) {
-    FreeListItem *to_free;
-    {
-        ScopedMutexLock lock(&free_list_lock);
-        to_free = free_list;
-        free_list = nullptr;
-    }
-    while (to_free) {
-        debug(user_context) << "    clReleaseMemObject " << (void *)to_free->ptr->mem << "\n";
-        cl_int err = clReleaseMemObject((cl_mem)to_free->ptr->mem);
-        free(to_free->ptr);
-
-        if (err != CL_SUCCESS) {
-            debug(user_context) << "    Error during clReleaseMemObject. Error code: " << err << "\n";
-        }
-        FreeListItem *next = to_free->next;
-        free(to_free);
-        to_free = next;
-    }
-    return 0;
-}
-
 }  // extern "C"
 
 namespace Halide {
@@ -657,6 +635,28 @@ WEAK cl_program compile_kernel(void *user_context, cl_context ctx, const char *s
         return nullptr;
     }
     return program;
+}
+
+WEAK int halide_opencl_release_unused_device_allocations(void *user_context) {
+    FreeListItem *to_free;
+    {
+        ScopedMutexLock lock(&free_list_lock);
+        to_free = free_list;
+        free_list = nullptr;
+    }
+    while (to_free) {
+        debug(user_context) << "    clReleaseMemObject " << (void *)to_free->ptr->mem << "\n";
+        cl_int err = clReleaseMemObject((cl_mem)to_free->ptr->mem);
+        free(to_free->ptr);
+
+        if (err != CL_SUCCESS) {
+            debug(user_context) << "    Error during clReleaseMemObject. Error code: " << err << "\n";
+        }
+        FreeListItem *next = to_free->next;
+        free(to_free);
+        to_free = next;
+    }
+    return 0;
 }
 
 WEAK halide_device_allocation_pool opencl_allocation_pool = {nullptr, nullptr};
@@ -1699,28 +1699,6 @@ WEAK halide_device_interface_t opencl_device_interface = {
 }  // namespace Internal
 }  // namespace Runtime
 }  // namespace Halide
-
-WEAK int halide_opencl_release_unused_device_allocations(void *user_context) {
-    FreeListItem *to_free;
-    {
-        ScopedMutexLock lock(&free_list_lock);
-        to_free = free_list;
-        free_list = nullptr;
-    }
-    while (to_free) {
-        debug(user_context) << "    clReleaseMemObject " << (void *)to_free->ptr->mem << "\n";
-        cl_int err = clReleaseMemObject((cl_mem)to_free->ptr->mem);
-        free(to_free->ptr);
-
-        if (err != CL_SUCCESS) {
-            debug(user_context) << "    Error during clReleaseMemObject. Error code: " << err << "\n";
-        }
-        FreeListItem *next = to_free->next;
-        free(to_free);
-        to_free = next;
-    }
-    return 0;
-}
 
 namespace Halide {
 namespace Runtime {
