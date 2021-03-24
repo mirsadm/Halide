@@ -1086,6 +1086,8 @@ void CodeGen_OpenCL_Dev::init_module() {
 
     src_stream << "#pragma OPENCL FP_CONTRACT ON\n";
 
+    src_stream << "#pragma OPENCL EXTENSION cl_khr_3d_image_writes : enable\n";
+
     // Write out the Halide math functions.
     src_stream << "inline float float_from_bits(unsigned int x) {return as_float(x);}\n"
                << "inline float nan_f32() { return NAN; }\n"
