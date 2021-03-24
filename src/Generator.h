@@ -258,6 +258,7 @@
  */
 
 #include <algorithm>
+#include <functional>
 #include <iterator>
 #include <limits>
 #include <memory>
@@ -1289,6 +1290,7 @@ class StubInputBuffer {
 
     template<typename T2>
     HALIDE_NO_USER_CODE_INLINE static Parameter parameter_from_buffer(const Buffer<T2> &b) {
+        internal_assert(b.defined());
         user_assert((Buffer<T>::can_convert_from(b)));
         Parameter p(b.type(), true, b.dimensions());
         p.set_buffer(b);
@@ -1316,19 +1318,14 @@ protected:
     void check_scheduled(const char *m) const;
     Target get_target() const;
 
-    explicit StubOutputBufferBase(const Func &f, std::shared_ptr<GeneratorBase> generator)
-        : f(f), generator(std::move(generator)) {
-    }
-    StubOutputBufferBase() = default;
+    StubOutputBufferBase();
+    explicit StubOutputBufferBase(const Func &f, const std::shared_ptr<GeneratorBase> &generator);
 
 public:
-    Realization realize(std::vector<int32_t> sizes) {
-        check_scheduled("realize");
-        return f.realize(std::move(sizes), get_target());
-    }
+    Realization realize(std::vector<int32_t> sizes);
 
     template<typename... Args>
-    Realization realize(Args &&... args) {
+    Realization realize(Args &&...args) {
         check_scheduled("realize");
         return f.realize(std::forward<Args>(args)..., get_target());
     }
@@ -1629,15 +1626,15 @@ public:
 // types in question satisfy the property of copies referring to the same underlying
 // structure (returning references is just an optimization). Since this is verbose
 // and used in several places, we'll use a helper macro:
-#define HALIDE_FORWARD_METHOD(Class, Method)                                                                                                         \
-    template<typename... Args>                                                                                                                       \
-    inline auto Method(Args &&... args)->typename std::remove_reference<decltype(std::declval<Class>().Method(std::forward<Args>(args)...))>::type { \
-        return this->template as<Class>().Method(std::forward<Args>(args)...);                                                                       \
+#define HALIDE_FORWARD_METHOD(Class, Method)                                                                                                        \
+    template<typename... Args>                                                                                                                      \
+    inline auto Method(Args &&...args)->typename std::remove_reference<decltype(std::declval<Class>().Method(std::forward<Args>(args)...))>::type { \
+        return this->template as<Class>().Method(std::forward<Args>(args)...);                                                                      \
     }
 
 #define HALIDE_FORWARD_METHOD_CONST(Class, Method)                                                                  \
     template<typename... Args>                                                                                      \
-    inline auto Method(Args &&... args) const->                                                                     \
+    inline auto Method(Args &&...args) const->                                                                      \
         typename std::remove_reference<decltype(std::declval<Class>().Method(std::forward<Args>(args)...))>::type { \
         this->check_gio_access();                                                                                   \
         return this->template as<Class>().Method(std::forward<Args>(args)...);                                      \
@@ -1686,7 +1683,7 @@ public:
     }
 
     template<typename... Args>
-    Expr operator()(Args &&... args) const {
+    Expr operator()(Args &&...args) const {
         this->check_gio_access();
         return Func(*this)(std::forward<Args>(args)...);
     }
@@ -1852,7 +1849,7 @@ public:
     }
 
     template<typename... Args>
-    Expr operator()(Args &&... args) const {
+    Expr operator()(Args &&...args) const {
         this->check_gio_access();
         return this->funcs().at(0)(std::forward<Args>(args)...);
     }
@@ -2311,7 +2308,7 @@ protected:
 
 public:
     template<typename... Args, typename T2 = T, typename std::enable_if<!std::is_array<T2>::value>::type * = nullptr>
-    FuncRef operator()(Args &&... args) const {
+    FuncRef operator()(Args &&...args) const {
         this->check_gio_access();
         return get_values<ValueType>().at(0)(std::forward<Args>(args)...);
     }
@@ -2874,7 +2871,7 @@ public:
     }
 
     template<typename T, typename... Args>
-    inline std::unique_ptr<T> apply(const Args &... args) const {
+    inline std::unique_ptr<T> apply(const Args &...args) const {
         auto t = this->create<T>();
         t->apply(args...);
         return t;
@@ -2968,7 +2965,6 @@ struct NoRealizations<T, Args...> {
 };
 
 class GeneratorStub;
-class SimpleGeneratorFactory;
 
 // Note that these functions must never return null:
 // if they cannot return a valid Generator, they must assert-fail.
@@ -3081,7 +3077,7 @@ public:
      * will assert-fail at Halide compile time.
      */
     template<typename... Args>
-    void set_inputs(const Args &... args) {
+    void set_inputs(const Args &...args) {
         // set_inputs_vector() checks this too, but checking it here allows build_inputs() to avoid out-of-range checks.
         GeneratorParamInfo &pi = this->param_info();
         user_assert(sizeof...(args) == pi.inputs().size())
@@ -3098,7 +3094,7 @@ public:
     // Only enable if none of the args are Realization; otherwise we can incorrectly
     // select this method instead of the Realization-as-outparam variant
     template<typename... Args, typename std::enable_if<NoRealizations<Args...>::value>::type * = nullptr>
-    Realization realize(Args &&... args) {
+    Realization realize(Args &&...args) {
         this->check_scheduled("realize");
         return get_pipeline().realize(std::forward<Args>(args)..., get_target());
     }
@@ -3176,7 +3172,7 @@ public:
     }
 
     template<typename... Args>
-    HALIDE_NO_USER_CODE_INLINE void add_requirement(Expr condition, Args &&... args) {
+    HALIDE_NO_USER_CODE_INLINE void add_requirement(Expr condition, Args &&...args) {
         get_pipeline().add_requirement(condition, std::forward<Args>(args)...);
     }
 
@@ -3241,6 +3237,8 @@ protected:
     void check_min_phase(Phase expected_phase) const;
     void advance_phase(Phase new_phase);
 
+    void ensure_configure_has_been_called();
+
 private:
     friend void ::Halide::Internal::generator_test();
     friend class GeneratorParamBase;
@@ -3249,7 +3247,6 @@ private:
     friend class GeneratorOutputBase;
     friend class GeneratorParamInfo;
     friend class GeneratorStub;
-    friend class SimpleGeneratorFactory;
     friend class StubOutputBufferBase;
 
     const size_t size;
@@ -3280,15 +3277,11 @@ private:
     void get_jit_target_from_environment();
     void get_target_from_environment();
 
-    // Return the Output<Func> or Output<Buffer> with the given name,
-    // which must be a singular (non-array) Func or Buffer output.
-    // If no such name exists (or is non-array), assert; this method never returns an undefined Func.
-    Func get_output(const std::string &n);
-
-    // Return the Output<Func[]> with the given name, which must be an
-    // array-of-Func output. If no such name exists (or is non-array), assert;
-    // this method never returns undefined Funcs.
-    std::vector<Func> get_array_output(const std::string &n);
+    // Return the output with the given name.
+    // If the output is singular (a non-array), return a vector of size 1.
+    // If no such name exists (or is non-array), assert.
+    // This method never returns undefined Funcs.
+    std::vector<Func> get_outputs(const std::string &n);
 
     void set_inputs_vector(const std::vector<std::vector<StubInput>> &inputs);
 
@@ -3493,7 +3486,7 @@ public:
     using Internal::GeneratorBase::create;
 
     template<typename... Args>
-    void apply(const Args &... args) {
+    void apply(const Args &...args) {
 #ifndef _MSC_VER
         // VS2015 apparently has some SFINAE issues, so this can inappropriately
         // trigger there. (We'll still fail when generate() is called, just
@@ -3568,7 +3561,10 @@ private:
     // have build() or configure()/generate()/schedule() methods.
 
     void call_configure_impl(double, double) {
-        // Called as a side effect for build()-method Generators; quietly do nothing.
+        pre_configure();
+        // Called as a side effect for build()-method Generators; quietly do nothing
+        // (except for pre_configure(), to advance the phase).
+        post_configure();
     }
 
     template<typename T2 = T,
@@ -3653,7 +3649,6 @@ protected:
 
 private:
     friend void ::Halide::Internal::generator_test();
-    friend class Internal::SimpleGeneratorFactory;
     friend void ::Halide::Internal::generator_test();
     friend class ::Halide::GeneratorContext;
 
@@ -3668,9 +3663,7 @@ namespace Internal {
 
 class RegisterGenerator {
 public:
-    RegisterGenerator(const char *registered_name, GeneratorFactory generator_factory) {
-        Internal::GeneratorRegistry::register_factory(registered_name, std::move(generator_factory));
-    }
+    RegisterGenerator(const char *registered_name, GeneratorFactory generator_factory);
 };
 
 class GeneratorStub : public NamesInterface {
@@ -3686,28 +3679,18 @@ public:
                                             const std::vector<std::vector<Internal::StubInput>> &inputs);
 
     // Output(s)
-    // TODO: identify vars used
-    Func get_output(const std::string &n) const {
-        return generator->get_output(n);
+    std::vector<Func> get_outputs(const std::string &n) const {
+        return generator->get_outputs(n);
     }
 
     template<typename T2>
-    T2 get_output_buffer(const std::string &n) const {
-        return T2(get_output(n), generator);
-    }
-
-    template<typename T2>
-    std::vector<T2> get_array_output_buffer(const std::string &n) const {
-        auto v = generator->get_array_output(n);
+    std::vector<T2> get_output_buffers(const std::string &n) const {
+        auto v = generator->get_outputs(n);
         std::vector<T2> result;
         for (auto &o : v) {
             result.push_back(T2(o, generator));
         }
         return result;
-    }
-
-    std::vector<Func> get_array_output(const std::string &n) const {
-        return generator->get_array_output(n);
     }
 
     static std::vector<StubInput> to_stub_input_vector(const Expr &e) {
