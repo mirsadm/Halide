@@ -27,30 +27,57 @@ namespace OpenCL {
 WEAK void *lib_opencl = nullptr;
 
 extern "C" WEAK void *halide_opencl_get_symbol(void *user_context, const char *name) {
+    static void *(*wrapper_loadOpenCLPointer)(const char *);
+
     // Only try to load the library if the library isn't already
     // loaded, or we can't load the symbol from the process already.
-    void *symbol = halide_get_library_symbol(lib_opencl, name);
+    void *symbol;
+    if (wrapper_loadOpenCLPointer) {
+        symbol = wrapper_loadOpenCLPointer(name);
+    } else {
+        symbol = halide_get_library_symbol(lib_opencl, name);
+    }
     if (symbol) {
         return symbol;
     }
 
-    const char *lib_names[] = {
-#ifdef WINDOWS
-        "opencl.dll",
-#else
-        "libOpenCL.so",
-        "/System/Library/Frameworks/OpenCL.framework/OpenCL",
-#endif
+    const char *lib_wrapper_names[] = {
+        "/vendor/lib64/libOpenCL-pixel.so"
     };
-    for (size_t i = 0; i < sizeof(lib_names) / sizeof(lib_names[0]); i++) {
-        lib_opencl = halide_load_library(lib_names[i]);
+    for (size_t i = 0; i < sizeof(lib_wrapper_names) / sizeof(lib_wrapper_names[0]); i++) {
+        lib_opencl = halide_load_library(lib_wrapper_names[i]);
         if (lib_opencl) {
-            debug(user_context) << "    Loaded OpenCL runtime library: " << lib_names[i] << "\n";
+            debug(user_context) << "    Loaded OpenCL runtime library wrapper: " << lib_wrapper_names[i] << "\n";
+            void (*func_enable)() = (void(*)())halide_get_library_symbol(lib_opencl, "enableOpenCL");
+            func_enable();
+            wrapper_loadOpenCLPointer = (void *(*)(const char *))halide_get_library_symbol(lib_opencl, "loadOpenCLPointer");
             break;
         }
     }
 
-    return halide_get_library_symbol(lib_opencl, name);
+    if (!lib_opencl) {
+        const char *lib_names[] = {
+#ifdef WINDOWS
+            "opencl.dll",
+#else
+            "libOpenCL.so",
+            "/System/Library/Frameworks/OpenCL.framework/OpenCL"
+#endif
+        };
+        for (size_t i = 0; i < sizeof(lib_names) / sizeof(lib_names[0]); i++) {
+            lib_opencl = halide_load_library(lib_names[i]);
+            if (lib_opencl) {
+                debug(user_context) << "    Loaded OpenCL runtime library: " << lib_names[i] << "\n";
+                break;
+            }
+        }
+    }
+
+    if (wrapper_loadOpenCLPointer) {
+        return wrapper_loadOpenCLPointer(name);
+    } else {
+        return halide_get_library_symbol(lib_opencl, name);
+    }
 }
 
 template<typename T>
