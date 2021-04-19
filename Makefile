@@ -513,6 +513,7 @@ SOURCE_FILES = \
   RDom.cpp \
   Realization.cpp \
   RealizationOrder.cpp \
+  RebaseLoopsToZero.cpp \
   Reduction.cpp \
   RegionCosts.cpp \
   RemoveDeadAllocations.cpp \
@@ -689,6 +690,7 @@ HEADER_FILES = \
   Realization.h \
   RDom.h \
   RealizationOrder.h \
+  RebaseLoopsToZero.h \
   Reduction.h \
   RegionCosts.h \
   RemoveDeadAllocations.h \
@@ -2127,7 +2129,7 @@ $(BUILD_DIR)/clang_ok:
 	@exit 1
 endif
 
-ifneq (,$(findstring $(LLVM_VERSION_TIMES_10), 100 110 111 120 130))
+ifneq (,$(findstring $(LLVM_VERSION_TIMES_10), 110 111 120 130))
 LLVM_OK=yes
 endif
 

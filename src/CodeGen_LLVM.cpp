@@ -91,7 +91,7 @@ using std::vector;
 
 #ifdef WITH_NVPTX
 #define InitializeNVPTXTarget() InitializeTarget(NVPTX)
-#define InitializeNVPTXAsmParser() InitializeAsmParser(NVPTX)
+// #define InitializeNVPTXAsmParser() InitializeAsmParser(NVPTX) // there is no ASM parser for NVPTX
 #define InitializeNVPTXAsmPrinter() InitializeAsmPrinter(NVPTX)
 #endif
 
@@ -490,7 +490,9 @@ std::unique_ptr<llvm::Module> CodeGen_LLVM::compile(const Module &input) {
     for (const auto &f : input.functions()) {
         const auto names = get_mangled_names(f, get_target());
 
-        compile_func(f, names.simple_name, names.extern_name);
+        run_with_large_stack([&]() {
+            compile_func(f, names.simple_name, names.extern_name);
+        });
 
         // If the Func is externally visible, also create the argv wrapper and metadata.
         // (useful for calling from JIT and other machine interfaces).
@@ -1124,7 +1126,6 @@ void CodeGen_LLVM::optimize_module() {
                 RequireAnalysisPass<ASanGlobalsMetadataAnalysis, llvm::Module>());
         });
 #endif
-#if LLVM_VERSION >= 110
         pb.registerOptimizerLastEPCallback(
             [](ModulePassManager &mpm, PassBuilder::OptimizationLevel level) {
                 constexpr bool compile_kernel = false;
@@ -1133,16 +1134,6 @@ void CodeGen_LLVM::optimize_module() {
                 mpm.addPass(createModuleToFunctionPassAdaptor(AddressSanitizerPass(
                     compile_kernel, recover, use_after_scope)));
             });
-#else
-        pb.registerOptimizerLastEPCallback(
-            [](FunctionPassManager &fpm, PassBuilder::OptimizationLevel level) {
-                constexpr bool compile_kernel = false;
-                constexpr bool recover = false;
-                constexpr bool use_after_scope = true;
-                fpm.addPass(AddressSanitizerPass(
-                    compile_kernel, recover, use_after_scope));
-            });
-#endif
 #if LLVM_VERSION >= 120
         pb.registerPipelineStartEPCallback(
             [](ModulePassManager &mpm, PassBuilder::OptimizationLevel) {
@@ -1169,18 +1160,11 @@ void CodeGen_LLVM::optimize_module() {
     }
 
     if (get_target().has_feature(Target::TSAN)) {
-#if LLVM_VERSION >= 110
         pb.registerOptimizerLastEPCallback(
             [](ModulePassManager &mpm, PassBuilder::OptimizationLevel level) {
                 mpm.addPass(
                     createModuleToFunctionPassAdaptor(ThreadSanitizerPass()));
             });
-#else
-        pb.registerOptimizerLastEPCallback(
-            [](FunctionPassManager &fpm, PassBuilder::OptimizationLevel level) {
-                fpm.addPass(ThreadSanitizerPass());
-            });
-#endif
     }
 
     for (llvm::Module::iterator i = module->begin(); i != module->end(); i++) {
@@ -1437,12 +1421,11 @@ void CodeGen_LLVM::visit(const Variable *op) {
 }
 
 template<typename Op>
-bool CodeGen_LLVM::try_to_fold_vector_reduce(const Op *op) {
-    const VectorReduce *red = op->a.template as<VectorReduce>();
-    Expr b = op->b;
+bool CodeGen_LLVM::try_to_fold_vector_reduce(const Expr &a, Expr b) {
+    const VectorReduce *red = a.as<VectorReduce>();
     if (!red) {
-        red = op->b.template as<VectorReduce>();
-        b = op->a;
+        red = b.as<VectorReduce>();
+        b = a;
     }
     if (red &&
         ((std::is_same<Op, Add>::value && red->op == VectorReduce::Add) ||
@@ -1450,7 +1433,8 @@ bool CodeGen_LLVM::try_to_fold_vector_reduce(const Op *op) {
          (std::is_same<Op, Max>::value && red->op == VectorReduce::Max) ||
          (std::is_same<Op, Mul>::value && red->op == VectorReduce::Mul) ||
          (std::is_same<Op, And>::value && red->op == VectorReduce::And) ||
-         (std::is_same<Op, Or>::value && red->op == VectorReduce::Or))) {
+         (std::is_same<Op, Or>::value && red->op == VectorReduce::Or) ||
+         (std::is_same<Op, Call>::value && red->op == VectorReduce::SaturatingAdd))) {
         codegen_vector_reduce(red, b);
         return true;
     }
@@ -1465,7 +1449,7 @@ void CodeGen_LLVM::visit(const Add *op) {
     }
 
     // Some backends can fold the add into a vector reduce
-    if (try_to_fold_vector_reduce(op)) {
+    if (try_to_fold_vector_reduce<Add>(op->a, op->b)) {
         return;
     }
 
@@ -1509,7 +1493,7 @@ void CodeGen_LLVM::visit(const Mul *op) {
         return;
     }
 
-    if (try_to_fold_vector_reduce(op)) {
+    if (try_to_fold_vector_reduce<Mul>(op->a, op->b)) {
         return;
     }
 
@@ -1569,7 +1553,7 @@ void CodeGen_LLVM::visit(const Min *op) {
         return;
     }
 
-    if (try_to_fold_vector_reduce(op)) {
+    if (try_to_fold_vector_reduce<Min>(op->a, op->b)) {
         return;
     }
 
@@ -1589,7 +1573,7 @@ void CodeGen_LLVM::visit(const Max *op) {
         return;
     }
 
-    if (try_to_fold_vector_reduce(op)) {
+    if (try_to_fold_vector_reduce<Max>(op->a, op->b)) {
         return;
     }
 
@@ -1708,7 +1692,7 @@ void CodeGen_LLVM::visit(const GE *op) {
 }
 
 void CodeGen_LLVM::visit(const And *op) {
-    if (try_to_fold_vector_reduce(op)) {
+    if (try_to_fold_vector_reduce<And>(op->a, op->b)) {
         return;
     }
 
@@ -1718,7 +1702,7 @@ void CodeGen_LLVM::visit(const And *op) {
 }
 
 void CodeGen_LLVM::visit(const Or *op) {
-    if (try_to_fold_vector_reduce(op)) {
+    if (try_to_fold_vector_reduce<Or>(op->a, op->b)) {
         return;
     }
 
@@ -2211,13 +2195,8 @@ void CodeGen_LLVM::codegen_predicated_vector_store(const Store *op) {
             Value *vec_ptr = builder->CreatePointerCast(elt_ptr, slice_val->getType()->getPointerTo());
 
             Value *slice_mask = slice_vector(vpred, i, slice_lanes);
-#if LLVM_VERSION >= 110
             Instruction *store_inst =
                 builder->CreateMaskedStore(slice_val, vec_ptr, llvm::Align(alignment), slice_mask);
-#else
-            Instruction *store_inst =
-                builder->CreateMaskedStore(slice_val, vec_ptr, alignment, slice_mask);
-#endif
             add_tbaa_metadata(store_inst, op->name, slice_index);
         }
     } else {  // It's not dense vector store, we need to scalarize it
@@ -2309,11 +2288,7 @@ llvm::Value *CodeGen_LLVM::codegen_dense_vector_load(const Type &type, const std
         Instruction *load_inst;
         if (vpred != nullptr) {
             Value *slice_mask = slice_vector(vpred, i, slice_lanes);
-#if LLVM_VERSION >= 110
             load_inst = builder->CreateMaskedLoad(vec_ptr, llvm::Align(align_bytes), slice_mask);
-#else
-            load_inst = builder->CreateMaskedLoad(vec_ptr, align_bytes, slice_mask);
-#endif
         } else {
             load_inst = builder->CreateAlignedLoad(vec_ptr->getType()->getPointerElementType(), vec_ptr, llvm::Align(align_bytes));
         }
@@ -2806,24 +2781,30 @@ void CodeGen_LLVM::visit(const Call *op) {
         }
     } else if (op->is_intrinsic(Call::saturating_add) || op->is_intrinsic(Call::saturating_sub)) {
         internal_assert(op->args.size() == 2);
-        std::string intrin;
-        if (op->type.is_int()) {
-            intrin = "llvm.s";
-        } else {
-            internal_assert(op->type.is_uint());
-            intrin = "llvm.u";
+
+        // Try to fold the vector reduce for a call to saturating_add
+        const bool folded = try_to_fold_vector_reduce<Call>(op->args[0], op->args[1]);
+
+        if (!folded) {
+            std::string intrin;
+            if (op->type.is_int()) {
+                intrin = "llvm.s";
+            } else {
+                internal_assert(op->type.is_uint());
+                intrin = "llvm.u";
+            }
+            if (op->is_intrinsic(Call::saturating_add)) {
+                intrin += "add.sat.";
+            } else {
+                internal_assert(op->is_intrinsic(Call::saturating_sub));
+                intrin += "sub.sat.";
+            }
+            if (op->type.lanes() > 1) {
+                intrin += "v" + std::to_string(op->type.lanes());
+            }
+            intrin += "i" + std::to_string(op->type.bits());
+            value = call_intrin(op->type, op->type.lanes(), intrin, op->args);
         }
-        if (op->is_intrinsic(Call::saturating_add)) {
-            intrin += "add.sat.";
-        } else {
-            internal_assert(op->is_intrinsic(Call::saturating_sub));
-            intrin += "sub.sat.";
-        }
-        if (op->type.lanes() > 1) {
-            intrin += "v" + std::to_string(op->type.lanes());
-        }
-        intrin += "i" + std::to_string(op->type.bits());
-        value = call_intrin(op->type, op->type.lanes(), intrin, op->args);
     } else if (op->is_intrinsic(Call::stringify)) {
         internal_assert(!op->args.empty());
 
@@ -4370,6 +4351,9 @@ void CodeGen_LLVM::codegen_vector_reduce(const VectorReduce *op, const Expr &ini
         break;
     case VectorReduce::Or:
         binop = Or::make;
+        break;
+    case VectorReduce::SaturatingAdd:
+        binop = saturating_add;
         break;
     }
 

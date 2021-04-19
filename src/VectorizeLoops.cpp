@@ -372,6 +372,7 @@ class SerializeLoops : public IRMutator {
 class PredicateLoadStore : public IRMutator {
     string var;
     Expr vector_predicate;
+    bool is_explicit;
     bool in_hexagon;
     const Target &target;
     int lanes;
@@ -381,7 +382,9 @@ class PredicateLoadStore : public IRMutator {
     using IRMutator::visit;
 
     bool should_predicate_store_load(int bit_size) {
-        if (in_hexagon) {
+        if (is_explicit) {
+            return true;
+        } else if (in_hexagon) {
             internal_assert(target.has_feature(Target::HVX))
                 << "We are inside a hexagon loop, but the target doesn't have hexagon's features\n";
             return true;
@@ -407,6 +410,7 @@ class PredicateLoadStore : public IRMutator {
     }
 
     Expr visit(const Load *op) override {
+        valid = valid && op->predicate.type().lanes() == lanes;
         valid = valid && should_predicate_store_load(op->type.bits());
         if (!valid) {
             return op;
@@ -435,6 +439,7 @@ class PredicateLoadStore : public IRMutator {
     }
 
     Stmt visit(const Store *op) override {
+        valid = valid && op->predicate.type().lanes() == lanes;
         valid = valid && should_predicate_store_load(op->value.type().bits());
         if (!valid) {
             return op;
@@ -472,9 +477,9 @@ class PredicateLoadStore : public IRMutator {
     }
 
 public:
-    PredicateLoadStore(string v, const Expr &vpred, bool in_hexagon, const Target &t)
-        : var(std::move(v)), vector_predicate(vpred), in_hexagon(in_hexagon), target(t),
-          lanes(vpred.type().lanes()), valid(true), vectorized(false) {
+    PredicateLoadStore(string v, const Expr &vpred, bool is_explicit, bool in_hexagon, const Target &t)
+        : var(std::move(v)), vector_predicate(vpred), is_explicit(is_explicit), in_hexagon(in_hexagon),
+          target(t), lanes(vpred.type().lanes()), valid(true), vectorized(false) {
         internal_assert(lanes > 1);
     }
 
@@ -482,6 +487,8 @@ public:
         return valid && vectorized;
     }
 };
+
+Stmt vectorize_statement(const Stmt &stmt, const Target &t);
 
 struct VectorizedVar {
     string name;
@@ -833,6 +840,12 @@ class VectorSubs : public IRMutator {
         Expr cond = mutate(op->condition);
         int lanes = cond.type().lanes();
 
+        bool explicit_predicate = false;
+        if (const Call *pred = Call::as_intrinsic(cond, {Call::predicate})) {
+            explicit_predicate = true;
+            cond = pred->args[0];
+        }
+
         debug(3) << "Vectorizing \n"
                  << "Old: " << op->condition << "\n"
                  << "New: " << cond << "\n";
@@ -845,16 +858,17 @@ class VectorSubs : public IRMutator {
             // which would mean control flow divergence within the
             // SIMD lanes.
 
-            bool vectorize_predicate = !(uses_gpu_vars(cond) || (vectorized_vars.size() > 1));
+            bool vectorize_predicate =
+                explicit_predicate || !(uses_gpu_vars(cond) || (vectorized_vars.size() > 1));
 
             Stmt predicated_stmt;
             if (vectorize_predicate) {
-                PredicateLoadStore p(vectorized_vars.front().name, cond, in_hexagon, target);
+                PredicateLoadStore p(vectorized_vars.front().name, cond, explicit_predicate, in_hexagon, target);
                 predicated_stmt = p.mutate(then_case);
                 vectorize_predicate = p.is_vectorized();
             }
             if (vectorize_predicate && else_case.defined()) {
-                PredicateLoadStore p(vectorized_vars.front().name, !cond, in_hexagon, target);
+                PredicateLoadStore p(vectorized_vars.front().name, !cond, explicit_predicate, in_hexagon, target);
                 predicated_stmt = Block::make(predicated_stmt, p.mutate(else_case));
                 vectorize_predicate = p.is_vectorized();
             }
@@ -882,12 +896,19 @@ class VectorSubs : public IRMutator {
                     // that's going to scalarize, because it's no
                     // longer likely.
                     Stmt without_likelies =
-                        IfThenElse::make(op->condition.as<Call>()->args[0],
+                        IfThenElse::make(unwrap_tags(op->condition),
                                          op->then_case, op->else_case);
+
+                    // scalarize() will put back all vectorized loops around the statement as serial,
+                    // but it still may happen that there are vectorized loops inside of the statement
+                    // itself which we may want to handle. All the context is invalid though, so
+                    // we just start anew for this specific statement.
+                    Stmt scalarized = scalarize(without_likelies, false);
+                    scalarized = vectorize_statement(scalarized, target);
                     Stmt stmt =
                         IfThenElse::make(all_true,
                                          then_case,
-                                         scalarize(without_likelies));
+                                         scalarized);
                     debug(4) << "...With all_true likely: \n"
                              << stmt << "\n";
                     return stmt;
@@ -1093,6 +1114,12 @@ class VectorSubs : public IRMutator {
                         reduce_op = VectorReduce::Or;
                     }
                 }
+            } else if (const Call *call_op = store->value.as<Call>()) {
+                if (call_op->is_intrinsic(Call::saturating_add)) {
+                    a = call_op->args[0];
+                    b = call_op->args[1];
+                    reduce_op = VectorReduce::SaturatingAdd;
+                }
             }
 
             if (!a.defined() || !b.defined()) {
@@ -1175,6 +1202,8 @@ class VectorSubs : public IRMutator {
                     return a && b;
                 case VectorReduce::Or:
                     return a || b;
+                case VectorReduce::SaturatingAdd:
+                    return saturating_add(a, b);
                 }
                 return Expr();
             };
@@ -1243,11 +1272,13 @@ class VectorSubs : public IRMutator {
         return scalarize(op);
     }
 
-    Stmt scalarize(Stmt s) {
+    Stmt scalarize(Stmt s, bool serialize_inner_loops = true) {
         // Wrap a serial loop around it. Maybe LLVM will have
         // better luck vectorizing it.
 
-        s = SerializeLoops().mutate(s);
+        if (serialize_inner_loops) {
+            s = SerializeLoops().mutate(s);
+        }
         // We'll need the original scalar versions of any containing lets.
         for (size_t i = containing_lets.size(); i > 0; i--) {
             const auto &l = containing_lets[i - 1];
@@ -1612,15 +1643,31 @@ class RemoveUnnecessaryAtomics : public IRMutator {
     }
 };
 
-}  // namespace
+class RemovePredicateHints : public IRMutator {
+    using IRMutator::visit;
 
+    Expr visit(const Call *op) override {
+        if (op->is_intrinsic(Call::predicate)) {
+            return op->args[0];
+        } else {
+            return IRMutator::visit(op);
+        }
+    }
+};
+
+Stmt vectorize_statement(const Stmt &stmt, const Target &t) {
+    return VectorizeLoops(t).mutate(stmt);
+}
+
+}  // namespace
 Stmt vectorize_loops(const Stmt &stmt, const map<string, Function> &env, const Target &t) {
     // Limit the scope of atomic nodes to just the necessary stuff.
     // TODO: Should this be an earlier pass? It's probably a good idea
     // for non-vectorizing stuff too.
     Stmt s = LiftVectorizableExprsOutOfAllAtomicNodes(env).mutate(stmt);
-    s = VectorizeLoops(t).mutate(s);
+    s = vectorize_statement(s, t);
     s = RemoveUnnecessaryAtomics().mutate(s);
+    s = RemovePredicateHints().mutate(s);
     return s;
 }
 
