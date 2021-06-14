@@ -277,7 +277,7 @@ class SloppyUnpredicateLoadsAndStores : public IRMutator {
                                    const_true(op->type.lanes()), op->alignment);
 
             return Call::make(op->type, Call::if_then_else,
-                              {condition, load, make_zero(op->type)}, Call::Intrinsic);
+                              {condition, load, make_zero(op->type)}, Call::PureIntrinsic);
         } else {
             // It's a predicated vector gather. Just scalarize. We'd
             // prefer to keep it in a loop, but that would require
@@ -287,7 +287,7 @@ class SloppyUnpredicateLoadsAndStores : public IRMutator {
             Expr load = Load::make(op->type, op->name, index, op->image, op->param,
                                    const_true(op->type.lanes()), op->alignment);
             return Call::make(op->type, Call::if_then_else,
-                              {predicate, load, make_zero(op->type)}, Call::Intrinsic);
+                              {predicate, load, make_zero(op->type)}, Call::PureIntrinsic);
         }
     }
 
@@ -1899,7 +1899,7 @@ void CodeGen_Hexagon::visit(const Call *op) {
         {Call::get_intrinsic_name(Call::saturating_sub), {"halide.hexagon.sat_sub", true}},
     };
 
-    if (is_native_interleave(op) || is_native_deinterleave(op)) {
+    if (is_native_interleave(op)) {
         internal_assert(
             op->type.lanes() % (native_vector_bits() * 2 / op->type.bits()) == 0);
     }
@@ -2099,7 +2099,7 @@ void CodeGen_Hexagon::visit(const Select *op) {
         // Implement scalar conditions on vector values with if-then-else.
         value = codegen(Call::make(op->type, Call::if_then_else,
                                    {op->condition, op->true_value, op->false_value},
-                                   Call::Intrinsic));
+                                   Call::PureIntrinsic));
     } else {
         CodeGen_Posix::visit(op);
     }
